@@ -14,6 +14,9 @@ export const METRICS = {
   avgTop: 'average height of the highest point of the body (m)',
   approach: 'how much closer to the target it finished than it started (m)',
   targetDist: 'final distance from the target (m)',
+  control: 'contest score: 1 is a draw, 2 means it holds the cube and the rival is nowhere near, 0 the reverse',
+  cubeDist: 'final distance from the cube to its nearest part (m)',
+  rivalCubeDist: 'final distance from the cube to the nearest part of the rival (m)',
   spin: 'total turning of the root part about the vertical axis (radians)',
   effort: 'average muscle activation, 0 to 1',
   parts: 'number of body parts',
@@ -26,9 +29,12 @@ export const GOALS = {
   jump: { name: 'Jump', formula: 'maxClearance', blurb: 'Get the whole body as high off the ground as possible.' },
   tall: { name: 'Stand tall', formula: 'avgTop', blurb: 'Keep the highest point of the body as high as possible.' },
   spin: { name: 'Spin', formula: 'spin', blurb: 'Turn around the vertical axis as much as possible.' },
+  contest: { name: 'Fight for the cube', formula: 'control', blurb: 'Two creatures start either side of a cube. Each is scored against the champion of the previous generation on who ends up closer to it, so a score of 1 is a draw and the chart need not climb.' },
   frugal: { name: 'Travel efficiently', formula: 'distance / (0.15 + effort)', blurb: 'Cover distance with as little muscle activity as possible.' },
 };
 
+// Contest formulas put a second creature and a cube in the world.
+export const usesContest = (formula) => /\b(control|cubeDist|rivalCubeDist)\b/.test(formula);
 export const usesTarget = (formula) => /\b(approach|targetDist)\b/.test(formula);
 
 // Compiles a formula such as "distance - 0.5 * effort" into a function of the

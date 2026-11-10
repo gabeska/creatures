@@ -1,7 +1,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { makeRng } from './util.js';
 import { ENVS } from './environments.js';
-import { GOALS, METRICS, checkGoal, INVALID } from './goals.js';
+import { GOALS, METRICS, checkGoal, usesContest, INVALID } from './goals.js';
 import { randomPopulation, randomViable, nextGeneration, sortByFitness } from './evolve.js';
 import { Pool } from './pool.js';
 import { Viewer } from './viewer.js';
@@ -20,6 +20,7 @@ const state = {
   formula: GOALS.travel.formula,
   key: '',
   watch: -1, // history index being watched
+  rival: null, // in a contest, the champion everyone is scored against
 };
 
 await RAPIER.init();
@@ -58,6 +59,7 @@ $('goal').onchange = () => {
   const g = GOALS[$('goal').value];
   if (g) setFormula(g.formula);
   syncBlurbs();
+  if (!state.history.length) showRandom();
 };
 $('formula').oninput = () => {
   const text = $('formula').value.trim();
@@ -95,6 +97,7 @@ function newPopulation() {
   state.gen = 0;
   state.history = [];
   state.watch = -1;
+  state.rival = null;
   state.key = '';
   $('statusLine').textContent = 'Not started.';
   $('progressBar').style.width = '0';
@@ -104,8 +107,10 @@ function newPopulation() {
 
 function showRandom() {
   const s = settings();
-  viewer.show({ genome: state.pop[0]?.genome ?? randomViable(state.rng), envId: s.envId, formula: s.formula, duration: s.duration });
-  $('capTitle').textContent = 'A random creature';
+  const contest = usesContest(s.formula);
+  const opponent = contest ? state.pop[1]?.genome ?? randomViable(state.rng) : null;
+  viewer.show({ genome: state.pop[0]?.genome ?? randomViable(state.rng), envId: s.envId, formula: s.formula, duration: s.duration, opponent });
+  $('capTitle').textContent = contest ? 'Two random creatures' : 'A random creature';
   $('capDetail').textContent = 'Generation 0 is all random. Start evolving to improve on it.';
 }
 
@@ -132,9 +137,13 @@ async function evolveLoop() {
       for (const c of state.pop) c.fitness = null;
       state.key = key;
     }
+    // In a contest everyone meets the previous champion, so scores go stale every generation.
+    const contest = usesContest(s.formula);
+    const rival = contest ? state.rival ?? state.pop[state.pop.length - 1].genome : null;
+    if (contest) for (const c of state.pop) c.fitness = null;
     const t0 = performance.now();
     const pending = state.pop.filter((c) => c.fitness === null).length;
-    const done = await pool.evaluate(state.pop, { envId: s.envId, formula: s.formula, duration: s.duration }, (n, total) => {
+    const done = await pool.evaluate(state.pop, { envId: s.envId, formula: s.formula, duration: s.duration, opponent: rival }, (n, total) => {
       $('progressBar').style.width = `${(100 * n) / total}%`;
       $('statusLine').textContent = `Generation ${state.gen + 1}: simulated ${n} of ${total} creatures on ${pool.size} workers.`;
     });
@@ -156,8 +165,9 @@ async function evolveLoop() {
     state.history.push({
       gen: state.gen, best: sorted[0].fitness, mean,
       genome: sorted[0].genome, metrics: sorted[0].metrics,
-      envId: s.envId, formula: s.formula, duration: s.duration,
+      envId: s.envId, formula: s.formula, duration: s.duration, opponent: rival,
     });
+    state.rival = sorted[0].genome;
     const rate = pending / ((performance.now() - t0) / 1000);
     $('statusLine').textContent = `Generation ${state.gen} done: ${pending} creatures at ${rate.toFixed(0)} per second.`;
     state.pop = nextGeneration(sorted, state.rng, s);
@@ -176,11 +186,13 @@ function watch(i, byUser) {
   if (byUser) $('follow').checked = latest;
   state.watch = i;
   // An unchanged champion keeps playing rather than restarting.
-  if (byUser || !prev || prev.genome !== h.genome || prev.envId !== h.envId || prev.formula !== h.formula) {
-    viewer.show({ genome: h.genome, envId: h.envId, formula: h.formula, duration: h.duration }, byUser);
+  if (byUser || !prev || prev.genome !== h.genome || prev.opponent !== h.opponent || prev.envId !== h.envId || prev.formula !== h.formula) {
+    viewer.show({ genome: h.genome, envId: h.envId, formula: h.formula, duration: h.duration, opponent: h.opponent }, byUser);
   }
   const goal = Object.values(GOALS).find((g) => g.formula === h.formula);
-  $('capTitle').textContent = `Champion of generation ${h.gen}`;
+  $('capTitle').textContent = h.opponent
+    ? `Generation ${h.gen} champion against the one before it (yellow)`
+    : `Champion of generation ${h.gen}`;
   $('capDetail').textContent = `Fitness ${fmt(h.best)} · ${h.metrics?.parts ?? '?'} parts · ${ENVS[h.envId].name} · ${goal ? goal.name : h.formula}`;
   refresh();
 }
@@ -203,7 +215,7 @@ function refresh() {
 $('save').onclick = () => {
   const data = {
     app: 'evolved-creatures', version: 1, settings: { ...settings(), goal: $('goal').value },
-    gen: state.gen, history: state.history, population: state.pop.map((c) => c.genome),
+    gen: state.gen, history: state.history, rival: state.rival, population: state.pop.map((c) => c.genome),
   };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
@@ -231,6 +243,7 @@ $('loadFile').onchange = async () => {
     state.pop = data.population.map((genome) => ({ genome, fitness: null }));
     state.history = Array.isArray(data.history) ? data.history : [];
     state.gen = data.gen ?? state.history.length;
+    state.rival = data.rival ?? null;
     state.key = '';
     state.watch = -1;
     $('run').textContent = 'Resume';

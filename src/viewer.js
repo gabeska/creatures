@@ -1,11 +1,13 @@
 // 3D playback of a creature. Runs the same Simulation class the workers use.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Simulation, DT, trialsFor } from './sim.js';
+import { Simulation, DT, CUBE_HALF, trialsFor } from './sim.js';
 import { ENVS, terrainMesh } from './environments.js';
 
 // One colour per genotype node, so repeated and mirrored segments match.
 const PART_COLORS = [0xe8d9b5, 0x6fa8dc, 0xe58a5a, 0x7cc4a0, 0xd9b44a, 0xc98bb9, 0x9a8fe0, 0xd97070];
+// In a contest the rival is drawn in yellows so the two can be told apart.
+const RIVAL_COLORS = [0xe9c93a, 0xc9a227, 0xf0dc7a, 0xb8902a, 0xe0b84a, 0xd6c25a, 0xa8861f, 0xf2d24e];
 
 function gridTexture() {
   const c = document.createElement('canvas');
@@ -77,6 +79,14 @@ export class Viewer {
     this.targetMesh.add(new THREE.PointLight(0xffe0a0, 12, 14));
     this.scene.add(this.targetMesh);
 
+    this.cubeMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(CUBE_HALF * 2, CUBE_HALF * 2, CUBE_HALF * 2),
+      new THREE.MeshStandardMaterial({ color: 0x8fc21f, roughness: 0.5 })
+    );
+    this.cubeMesh.castShadow = true;
+    this.cubeMesh.receiveShadow = true;
+    this.scene.add(this.cubeMesh);
+
     this.gridTex = gridTexture();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
@@ -92,7 +102,7 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
   }
 
-  // spec: { genome, envId, formula, duration }. With immediate = false the
+  // spec: { genome, envId, formula, duration, opponent }. With immediate = false the
   // switch waits for the current replay to end, so playback is not cut short.
   show(spec, immediate = true) {
     if (immediate || !this.sim) {
@@ -164,19 +174,20 @@ export class Viewer {
     const trials = trialsFor(env, spec.formula);
     this.trial %= trials.length;
     const target = trials[this.trial];
-    this.sim = new Simulation(this.R, spec.genome, env, { duration: spec.duration, target });
-    this.targetMesh.visible = !!target;
+    this.sim = new Simulation(this.R, spec.genome, env, { duration: spec.duration, target, opponent: spec.opponent ?? null });
+    this.targetMesh.visible = !!target && !this.sim.contest;
+    this.cubeMesh.visible = this.sim.contest;
     if (target) this.targetMesh.position.set(...target);
 
     for (const o of [...this.bodyGroup.children]) {
       this.bodyGroup.remove(o);
       o.geometry.dispose();
     }
-    this.meshes = this.sim.parts.map((p) => {
+    this.meshes = this.sim.allParts.map((p) => {
       const geo = new THREE.BoxGeometry(p.half[0] * 2, p.half[1] * 2, p.half[2] * 2);
       const mesh = new THREE.Mesh(
         geo,
-        new THREE.MeshStandardMaterial({ color: PART_COLORS[p.node % PART_COLORS.length], roughness: 0.6 })
+        new THREE.MeshStandardMaterial({ color: (p.owner ? RIVAL_COLORS : PART_COLORS)[p.node % PART_COLORS.length], roughness: 0.6 })
       );
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -188,7 +199,7 @@ export class Viewer {
     this.rest = 0;
     this.sync();
     // Jump the camera to the creature, keeping the viewing angle.
-    const c = this.sim.com;
+    const c = this.sim.focus;
     const delta = new THREE.Vector3(c[0], c[1], c[2]).sub(this.controls.target);
     this.controls.target.add(delta);
     this.camera.position.add(delta);
@@ -196,7 +207,13 @@ export class Viewer {
 
   sync() {
     const sim = this.sim;
-    sim.parts.forEach((p, i) => {
+    if (sim.cube) {
+      const t = sim.cube.translation();
+      const r = sim.cube.rotation();
+      this.cubeMesh.position.set(t.x, t.y, t.z);
+      this.cubeMesh.quaternion.set(r.x, r.y, r.z, r.w);
+    }
+    sim.allParts.forEach((p, i) => {
       const t = p.body.translation();
       const q = sim.partRotation(p);
       this.meshes[i].position.set(t.x, t.y, t.z);
@@ -227,8 +244,8 @@ export class Viewer {
           this.restart();
         }
       }
-      // Follow the centre of mass.
-      const c = this.sim.com;
+      // Follow the creature, or the cube in a contest.
+      const c = this.sim.focus;
       const goal = new THREE.Vector3(c[0], c[1], c[2]);
       const delta = goal.sub(this.controls.target).multiplyScalar(Math.min(1, dt * 4));
       this.controls.target.add(delta);

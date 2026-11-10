@@ -86,7 +86,7 @@ code { font-family: ui-monospace, Consolas, monospace; color: var(--ink2); }
 #view { position: absolute; inset: 0; }
 #view canvas { display: block; }
 #caption {
-  position: absolute; left: 16px; top: 14px; pointer-events: none;
+  position: absolute; left: 16px; top: 14px; max-width: calc(100% - 32px); pointer-events: none;
   background: rgba(13, 13, 13, 0.62); padding: 8px 12px; border-radius: 8px;
 }
 #capTitle { font-weight: 600; }

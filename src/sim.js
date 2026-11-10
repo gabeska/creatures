@@ -1,14 +1,15 @@
-// Physical simulation of one creature. Used both headless (fitness evaluation
-// in workers) and stepped frame by frame by the viewer, so what you watch is
-// exactly what was scored.
+// Physical simulation of one creature, or of two creatures contesting a cube.
+// Used both headless (fitness evaluation in workers) and stepped frame by
+// frame by the viewer, so what you watch is exactly what was scored.
 
 import { clamp, qmul, qconj, qrot } from './util.js';
 import { N_SENSORS } from './genome.js';
 import { develop } from './phenotype.js';
 import { terrainMesh } from './environments.js';
-import { usesTarget, INVALID } from './goals.js';
+import { usesTarget, usesContest, INVALID } from './goals.js';
 
 export const DT = 1 / 60;
+export const CUBE_HALF = 0.25;
 const SETTLE_STEPS = 90; // let the body come to rest before the brain switches on
 const DENSITY = 1;
 const MUSCLE = 22; // joint stiffness per unit of cross-section area
@@ -17,23 +18,33 @@ const MAX_JOINT_HZ = 25; // highest natural frequency a joint spring may have, r
 const ARMATURE = 0.3;
 const MASS_RATIO = 0.5;
 const MAX_SPEED = 15; // anything faster is a physics glitch, not a gait
-const GROUND = 0x00010002;
-const BODY = 0x00020001; // parts touch the ground but not each other
+
+// Collision groups (membership << 16 | filter). Parts of one creature pass
+// through each other, but collide with the ground, the cube and the rival.
+const G_GROUND = 0x0001000e;
+const G_CREATURE = [0x0002000d, 0x0004000b];
+const G_CUBE = 0x00080007;
 
 const terrainCache = new Map();
 const IDENT = { x: 0, y: 0, z: 0, w: 1 };
+const TURNED = [0, 1, 0, 0]; // half a turn about the vertical axis
 const V = (a) => ({ x: a[0], y: a[1], z: a[2] });
+const Q = (q) => ({ x: q[0], y: q[1], z: q[2], w: q[3] });
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const len = (a) => Math.hypot(a[0], a[1], a[2]);
 
 export class Simulation {
-  constructor(RAPIER, genome, env, { duration = 10, target = null } = {}) {
+  // With `opponent` (a genome) the two creatures start either side of a cube.
+  constructor(RAPIER, genome, env, { duration = 10, target = null, opponent = null } = {}) {
     this.R = RAPIER;
     this.env = env;
-    this.target = target;
+    this.contest = !!opponent;
+    this.target = this.contest ? null : target;
     this.settle = env.water ? 0 : SETTLE_STEPS;
     this.totalSteps = this.settle + Math.round(duration / DT);
     this.stepCount = 0;
     this.valid = true;
+    this.rivalFailed = false;
     this.time = 0;
 
     const world = (this.world = new RAPIER.World({ x: 0, y: -env.gravity, z: 0 }));
@@ -51,23 +62,76 @@ export class Simulation {
         const mesh = terrainCache.get(env.terrain);
         desc = RAPIER.ColliderDesc.trimesh(mesh.vertices, mesh.indices);
       }
-      this.ground = world.createCollider(desc.setFriction(env.friction).setCollisionGroups(GROUND), body);
+      this.ground = world.createCollider(desc.setFriction(env.friction).setCollisionGroups(G_GROUND), body);
     }
 
-    const parts = (this.parts = develop(genome));
+    this.cube = null;
+    if (this.contest) {
+      const y = env.terrain ? CUBE_HALF + 0.02 : 0;
+      const desc = RAPIER.RigidBodyDesc.dynamic().setTranslation(0, y, 0).setCanSleep(false);
+      if (env.water) desc.setLinearDamping(1.5).setAngularDamping(1.5);
+      this.cube = world.createRigidBody(desc);
+      world.createCollider(
+        RAPIER.ColliderDesc.cuboid(CUBE_HALF, CUBE_HALF, CUBE_HALF).setDensity(DENSITY).setFriction(env.friction).setCollisionGroups(G_CUBE),
+        this.cube
+      );
+    }
 
-    // Stand the creature on the ground.
-    let lift = 0;
+    this.creatures = [this.addCreature(genome, 0)];
+    if (this.contest) this.creatures.push(this.addCreature(opponent, 1));
+    this.parts = this.creatures[0].parts;
+    this.allParts = this.creatures.flatMap((c) => c.parts);
+
+    this.com = this.creatures[0].com;
+    this.start = this.com;
+    this.m = {
+      pathLength: 0, maxClearance: 0, sumClearance: 0, maxTop: 0, sumTop: 0,
+      spin: 0, sumEffort: 0, samples: 0, startTargetDist: 0,
+    };
+  }
+
+  addCreature(genome, index) {
+    const { R: RAPIER, world, env } = this;
+    const parts = develop(genome);
+
+    // Where the creature goes. Alone, it stands at the origin. In a contest
+    // each starts on its own side of the cube, set back by at least its own
+    // height so that simply falling over cannot reach the cube, and the
+    // second one is turned around so both face the cube the same way.
+    const box = [0, 1, 2].map((a) => {
+      let lo = Infinity, hi = -Infinity;
+      for (const p of parts) {
+        const e = extent(p.rot, p.half, a);
+        lo = Math.min(lo, p.pos[a] - e);
+        hi = Math.max(hi, p.pos[a] + e);
+      }
+      return [lo, hi];
+    });
+    const offset = [0, 0, 0];
+    if (this.contest) {
+      const gap = Math.max(1.2, box[1][1] - box[1][0]);
+      offset[0] = -(CUBE_HALF + gap) - box[0][1];
+      offset[2] = -(box[2][0] + box[2][1]) / 2;
+    }
+    const turned = index === 1;
+    const place = (v) => {
+      const w = [v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]];
+      return turned ? [-w[0], w[1], -w[2]] : w;
+    };
     if (env.terrain) {
-      let lowest = Infinity;
-      for (const p of parts) lowest = Math.min(lowest, p.pos[1] - extentY(p.rot, p.half));
-      lift = 0.03 - lowest;
+      let ground = -Infinity;
+      for (const p of parts) {
+        const w = place(p.pos);
+        ground = Math.max(ground, env.heightAt(w[0], w[2]));
+      }
+      offset[1] = ground + 0.03 - box[1][0];
     }
 
     // A light part joined to a heavy one far from the joint makes the solver
     // diverge, so every part gets some extra rotational inertia ("armature")
     // in proportion to what its neighbours hang off it.
     for (const p of parts) {
+      p.owner = index;
       p.mass = 8 * p.half[0] * p.half[1] * p.half[2] * DENSITY;
       p.arm = 0;
     }
@@ -86,24 +150,26 @@ export class Simulation {
       p.mass += p.extra;
     }
 
-    this.totalMass = 0;
+    let totalMass = 0;
     for (const p of parts) {
+      const w = place(p.pos);
       p.body = world.createRigidBody(
         RAPIER.RigidBodyDesc.dynamic()
-          .setTranslation(p.pos[0], p.pos[1] + lift, p.pos[2])
+          .setTranslation(w[0], w[1], w[2])
+          .setRotation(turned ? Q(TURNED) : IDENT)
           .setCanSleep(false)
           .setAngularDamping(0.05)
           .setAdditionalMassProperties(p.extra, { x: 0, y: 0, z: 0 }, { x: p.arm, y: p.arm, z: p.arm }, IDENT)
       );
       p.collider = world.createCollider(
         RAPIER.ColliderDesc.cuboid(p.half[0], p.half[1], p.half[2])
-          .setRotation({ x: p.rot[0], y: p.rot[1], z: p.rot[2], w: p.rot[3] })
+          .setRotation(Q(p.rot))
           .setDensity(DENSITY)
           .setFriction(env.friction)
-          .setCollisionGroups(BODY),
+          .setCollisionGroups(G_CREATURE[index]),
         p.body
       );
-      this.totalMass += p.mass;
+      totalMass += p.mass;
       p.joint = null;
       p.out = 0;
       p.aim = 0;
@@ -118,7 +184,7 @@ export class Simulation {
         world.createImpulseJoint(RAPIER.JointData.fixed(a1, IDENT, a2, IDENT), P.body, p.body, true);
         continue;
       }
-      // All bodies start with the same orientation, so one axis serves both.
+      // All bodies of a creature start with the same orientation, so one axis serves both.
       const joint = world.createImpulseJoint(RAPIER.JointData.revolute(a1, a2, V(p.axis)), P.body, p.body, true);
       joint.setLimits(p.lo, p.hi);
       joint.configureMotorModel(RAPIER.MotorModel.ForceBased);
@@ -133,18 +199,13 @@ export class Simulation {
       p.joint = joint;
     }
 
-    this.buildBrain(genome);
-
-    this.com = this.centerOfMass();
-    this.start = this.com;
-    this.m = {
-      pathLength: 0, maxClearance: 0, sumClearance: 0, maxTop: 0, sumTop: 0,
-      spin: 0, sumEffort: 0, samples: 0, startTargetDist: 0,
-    };
+    this.buildBrain(parts, genome);
+    const creature = { index, parts, totalMass, com: null };
+    creature.com = this.centerOfMass(creature);
+    return creature;
   }
 
-  buildBrain(genome) {
-    const parts = this.parts;
+  buildBrain(parts, genome) {
     for (const p of parts) {
       const node = genome.nodes[p.node];
       p.sig = new Float32Array(N_SENSORS + node.neurons.length);
@@ -166,51 +227,71 @@ export class Simulation {
     }
   }
 
-  centerOfMass() {
+  centerOfMass(creature) {
     let x = 0, y = 0, z = 0;
-    for (const p of this.parts) {
+    for (const p of creature.parts) {
       const t = p.body.translation();
       x += t.x * p.mass; y += t.y * p.mass; z += t.z * p.mass;
     }
-    return [x / this.totalMass, y / this.totalMass, z / this.totalMass];
+    return [x / creature.totalMass, y / creature.totalMass, z / creature.totalMass];
   }
 
-  // World-space orientation of the box for part i, as [x, y, z, w].
+  // World-space orientation of a part's box, as [x, y, z, w].
   partRotation(p) {
     const r = p.body.rotation();
     return qmul([r.x, r.y, r.z, r.w], p.rot);
   }
 
+  cubePosition() {
+    const t = this.cube.translation();
+    return [t.x, t.y, t.z];
+  }
+
+  // What the "target" sensors point at: the cube in a contest, else the light.
+  targetPosition() {
+    return this.contest ? this.cubePosition() : this.target;
+  }
+
+  // The point worth looking at.
+  get focus() {
+    return this.contest ? this.cubePosition() : this.com;
+  }
+
   get done() {
-    return this.stepCount >= this.totalSteps || !this.valid;
+    return this.stepCount >= this.totalSteps || !this.valid || this.rivalFailed;
   }
 
   step() {
     if (this.done) return false;
     const active = this.stepCount >= this.settle;
-    const parts = this.parts;
     const world = this.world;
 
-    for (const p of parts) p.wrot = this.partRotation(p);
+    for (const p of this.allParts) p.wrot = this.partRotation(p);
 
     if (active) {
       this.time += DT;
-      this.sense();
-      this.think();
-      let effort = 0, joints = 0;
-      for (const p of parts) {
-        if (!p.joint) continue;
-        const e = p.effector;
-        const out = clamp(e.src.sig[e.idx] * e.w, -1, 1);
-        p.out = out;
-        effort += Math.abs(out);
-        joints++;
-        // Muscles cannot snap to a new length: the target angle moves at a limited rate.
-        const want = (p.lo + p.hi) / 2 + (out * (p.hi - p.lo)) / 2;
-        p.aim += clamp(want - p.aim, -SLEW * DT, SLEW * DT);
-        p.joint.configureMotorPosition(p.aim, p.stiffness, p.stiffness * 0.08);
+      const tgt = this.targetPosition();
+      for (const c of this.creatures) {
+        const rival = this.contest ? this.creatures[1 - c.index].com : null;
+        this.sense(c.parts, tgt, rival);
       }
-      this.m.sumEffort += joints ? effort / joints : 0;
+      for (const c of this.creatures) this.think(c.parts);
+      for (const c of this.creatures) {
+        let effort = 0, joints = 0;
+        for (const p of c.parts) {
+          if (!p.joint) continue;
+          const e = p.effector;
+          const out = clamp(e.src.sig[e.idx] * e.w, -1, 1);
+          p.out = out;
+          effort += Math.abs(out);
+          joints++;
+          // Muscles cannot snap to a new length: the target angle moves at a limited rate.
+          const want = (p.lo + p.hi) / 2 + (out * (p.hi - p.lo)) / 2;
+          p.aim += clamp(want - p.aim, -SLEW * DT, SLEW * DT);
+          p.joint.configureMotorPosition(p.aim, p.stiffness, p.stiffness * 0.08);
+        }
+        if (c.index === 0) this.m.sumEffort += joints ? effort / joints : 0;
+      }
     }
 
     if (this.env.water) this.applyDrag();
@@ -219,33 +300,39 @@ export class Simulation {
     this.stepCount++;
 
     // Reject numerical blow-ups.
-    for (const p of parts) {
+    for (const p of this.allParts) {
       const v = p.body.linvel();
-      const s = Math.hypot(v.x, v.y, v.z);
-      if (!(s < MAX_SPEED)) {
-        this.valid = false;
+      if (!(Math.hypot(v.x, v.y, v.z) < MAX_SPEED)) {
+        if (p.owner === 0) this.valid = false;
+        else this.rivalFailed = true;
         return false;
       }
     }
 
-    const com = this.centerOfMass();
+    for (const c of this.creatures) if (c.index > 0) c.com = this.centerOfMass(c);
+    const com = this.centerOfMass(this.creatures[0]);
     if (this.stepCount === this.settle || (this.settle === 0 && this.stepCount === 1)) {
       this.start = com;
-      if (this.target) this.m.startTargetDist = Math.hypot(...sub(this.target, com));
+      const tgt = this.targetPosition();
+      if (tgt) this.m.startTargetDist = len(sub(tgt, com));
     } else if (active) {
       this.measure(com);
     }
-    this.com = com;
+    this.com = this.creatures[0].com = com;
     return !this.done;
   }
 
-  sense() {
-    const tgt = this.target;
-    for (const p of this.parts) {
+  sense(parts, tgt, rival) {
+    const toLocal = (q, from, to) => {
+      const d = [to[0] - from.x, to[1] - from.y, to[2] - from.z];
+      const l = len(d) || 1;
+      return qrot(qconj(q), [d[0] / l, d[1] / l, d[2] / l]);
+    };
+    for (const p of parts) {
       const s = p.sig;
       const q = p.wrot;
       if (p.joint) {
-        const a = this.parts[p.parent].body.rotation();
+        const a = parts[p.parent].body.rotation();
         const b = p.body.rotation();
         const rel = qmul(qconj([a.x, a.y, a.z, a.w]), [b.x, b.y, b.z, b.w]);
         let ang = 2 * Math.atan2(rel[0] * p.axis[0] + rel[1] * p.axis[1] + rel[2] * p.axis[2], rel[3]);
@@ -261,18 +348,22 @@ export class Simulation {
       }
       s[1] = touching;
       s[2] = qrot(q, [0, 1, 0])[1];
-      if (tgt) {
+      if (tgt || rival) {
         const t = p.body.translation();
-        const d = [tgt[0] - t.x, tgt[1] - t.y, tgt[2] - t.z];
-        const l = Math.hypot(d[0], d[1], d[2]) || 1;
-        const local = qrot(qconj(q), [d[0] / l, d[1] / l, d[2] / l]);
-        s[3] = local[0]; s[4] = local[1]; s[5] = local[2];
+        if (tgt) {
+          const l = toLocal(q, t, tgt);
+          s[3] = l[0]; s[4] = l[1]; s[5] = l[2];
+        }
+        if (rival) {
+          const l = toLocal(q, t, rival);
+          s[7] = l[0]; s[8] = l[1]; s[9] = l[2];
+        }
       }
     }
   }
 
-  think() {
-    for (const p of this.parts) {
+  think(parts) {
+    for (const p of parts) {
       const cur = p.sig;
       const next = p.next;
       for (let i = 0; i < N_SENSORS; i++) next[i] = cur[i];
@@ -310,12 +401,12 @@ export class Simulation {
         next[N_SENSORS + i] = o > 1 ? 1 : o < -1 ? -1 : o === o ? o : 0;
       }
     }
-    for (const p of this.parts) {
+    // Inputs hold references to parts and read p.sig when used, so swapping the buffers is enough.
+    for (const p of parts) {
       const t = p.sig;
       p.sig = p.next;
       p.next = t;
     }
-    // Inputs hold references to parts, and read p.sig at use time, so the swap is all that is needed.
   }
 
   // Viscous water: each patch of surface moving into the water is pushed back
@@ -323,7 +414,7 @@ export class Simulation {
   // into four patches so that spinning is resisted as well as sliding.
   applyDrag() {
     const k = this.env.drag;
-    for (const p of this.parts) {
+    for (const p of this.allParts) {
       const body = p.body;
       body.resetForces(true);
       body.resetTorques(true);
@@ -362,11 +453,11 @@ export class Simulation {
   measure(com) {
     const m = this.m;
     const env = this.env;
-    m.pathLength += Math.hypot(...sub(com, this.com));
+    m.pathLength += len(sub(com, this.com));
     let low = Infinity, top = -Infinity;
     for (const p of this.parts) {
       const t = p.body.translation();
-      const ext = extentY(this.partRotation(p), p.half);
+      const ext = extent(this.partRotation(p), p.half, 1);
       const g = env.water ? this.start[1] : env.heightAt(t.x, t.z);
       low = Math.min(low, t.y - ext - g);
       top = Math.max(top, t.y + ext - g);
@@ -379,14 +470,33 @@ export class Simulation {
     m.samples++;
   }
 
+  // Distance from the cube to the nearest part of a creature.
+  reach(creature) {
+    const cube = this.cube.translation();
+    let best = Infinity;
+    for (const p of creature.parts) {
+      const t = p.body.translation();
+      best = Math.min(best, Math.hypot(t.x - cube.x, t.y - cube.y, t.z - cube.z));
+    }
+    return best;
+  }
+
   metrics() {
     const m = this.m;
     const n = Math.max(1, m.samples);
     const d = sub(this.com, this.start);
     const water = this.env.water;
-    const targetDist = this.target ? Math.hypot(...sub(this.target, this.com)) : 0;
+    const tgt = this.targetPosition();
+    const targetDist = tgt ? len(sub(tgt, this.com)) : 0;
+    let cubeDist = 0, rivalCubeDist = 0, control = 0;
+    if (this.contest) {
+      cubeDist = this.reach(this.creatures[0]);
+      rivalCubeDist = this.reach(this.creatures[1]);
+      // Sims' contest score: 1 is a draw, 2 is total control, 0 is total defeat.
+      control = 1 + (rivalCubeDist - cubeDist) / (rivalCubeDist + cubeDist);
+    }
     return {
-      distance: water ? Math.hypot(d[0], d[1], d[2]) : Math.hypot(d[0], d[2]),
+      distance: water ? len(d) : Math.hypot(d[0], d[2]),
       pathLength: m.pathLength,
       avgSpeed: m.pathLength / (n * DT),
       dx: d[0], dy: d[1], dz: d[2],
@@ -394,12 +504,13 @@ export class Simulation {
       avgClearance: m.sumClearance / n,
       maxTop: m.maxTop,
       avgTop: m.sumTop / n,
-      approach: this.target ? m.startTargetDist - targetDist : 0,
+      approach: tgt ? m.startTargetDist - targetDist : 0,
       targetDist,
+      control, cubeDist, rivalCubeDist,
       spin: Math.abs(m.spin),
       effort: m.sumEffort / n,
       parts: this.parts.length,
-      mass: this.totalMass,
+      mass: this.creatures[0].totalMass,
     };
   }
 
@@ -415,25 +526,28 @@ function axisInertia(p, axis) {
   return p.arm + (p.mass / 3) * ((y * y + z * z) * a[0] * a[0] + (x * x + z * z) * a[1] * a[1] + (x * x + y * y) * a[2] * a[2]);
 }
 
-// Half-height of a rotated box along the world's vertical axis.
-function extentY(q, h) {
+// Half-size of a rotated box along world axis a (0 = x, 1 = y, 2 = z).
+function extent(q, h, a) {
   const [x, y, z, w] = q;
-  return (
-    Math.abs(2 * (x * y + w * z)) * h[0] +
-    Math.abs(1 - 2 * (x * x + z * z)) * h[1] +
-    Math.abs(2 * (y * z - w * x)) * h[2]
-  );
+  const row = a === 0
+    ? [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)]
+    : a === 1
+      ? [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)]
+      : [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)];
+  return Math.abs(row[0]) * h[0] + Math.abs(row[1]) * h[1] + Math.abs(row[2]) * h[2];
 }
 
-// Which target positions a goal is tested against in an environment.
-export const trialsFor = (env, formula) => (usesTarget(formula) ? env.targets : [null]);
+// Which target positions a goal is tested against; each is a separate trial.
+export const trialsFor = (env, formula) => (usesTarget(formula) && !usesContest(formula) ? env.targets : [null]);
 
 // Run a creature to completion and score it. Metrics are averaged over trials.
-export function evaluate(RAPIER, genome, env, formula, goalFn, duration) {
+// `opponent` is only used when the formula is a contest.
+export function evaluate(RAPIER, genome, env, formula, goalFn, duration, opponent = null) {
   const trials = trialsFor(env, formula);
+  const rival = usesContest(formula) ? opponent : null;
   let total = null;
   for (const target of trials) {
-    const sim = new Simulation(RAPIER, genome, env, { duration, target });
+    const sim = new Simulation(RAPIER, genome, env, { duration, target, opponent: rival });
     while (sim.step());
     const ok = sim.valid;
     const m = sim.metrics();

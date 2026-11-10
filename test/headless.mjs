@@ -3,7 +3,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { makeRng } from '../src/util.js';
 import { ENVS } from '../src/environments.js';
-import { GOALS, compileGoal, INVALID } from '../src/goals.js';
+import { GOALS, compileGoal, usesContest, INVALID } from '../src/goals.js';
 import { evaluate } from '../src/sim.js';
 import { randomPopulation, nextGeneration, sortByFitness } from '../src/evolve.js';
 
@@ -14,13 +14,15 @@ const formula = GOALS[goalId]?.formula ?? goalId;
 const goalFn = compileGoal(formula);
 const rng = makeRng(1);
 let pop = randomPopulation(rng, +size);
+const contest = usesContest(formula);
+let rival = pop[0].genome;
 
 for (let gen = 0; gen < +gens; gen++) {
   const t0 = performance.now();
   let evals = 0;
   for (const c of pop) {
-    if (c.fitness !== null) continue;
-    Object.assign(c, evaluate(RAPIER, c.genome, env, formula, goalFn, 8));
+    if (c.fitness !== null && !contest) continue;
+    Object.assign(c, evaluate(RAPIER, c.genome, env, formula, goalFn, 8, rival));
     evals++;
   }
   const sorted = sortByFitness(pop);
@@ -29,12 +31,13 @@ for (let gen = 0; gen < +gens; gen++) {
   const ms = (performance.now() - t0) / Math.max(1, evals);
   console.log(
     `gen ${gen} best ${sorted[0].fitness.toFixed(2)} mean ${mean.toFixed(2)} invalid ${pop.length - valid.length} ` +
-      `parts ${sorted[0].metrics?.parts} ${ms.toFixed(1)} ms/eval`
+      `parts ${sorted[0].metrics?.parts} ${ms.toFixed(1)} ms/eval` + (contest ? ` cube ${sorted[0].metrics.cubeDist.toFixed(2)} rival ${sorted[0].metrics.rivalCubeDist.toFixed(2)}` : '')
   );
   // Determinism: the champion must score the same when simulated again.
   if (gen === +gens - 1) {
-    const again = evaluate(RAPIER, sorted[0].genome, env, formula, goalFn, 8);
+    const again = evaluate(RAPIER, sorted[0].genome, env, formula, goalFn, 8, rival);
     console.log('replay', again.fitness.toFixed(4), 'vs', sorted[0].fitness.toFixed(4), JSON.stringify(again.metrics));
   }
+  rival = sorted[0].genome;
   pop = nextGeneration(sorted, rng, { size: +size });
 }

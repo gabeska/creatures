@@ -6,8 +6,8 @@
 
 import { clamp } from './util.js';
 
-export const N_SENSORS = 7; // angle, contact, tilt, target xyz, constant
-export const SENSOR_NAMES = ['joint angle', 'contact', 'tilt', 'target x', 'target y', 'target z', 'constant'];
+export const N_SENSORS = 10; // angle, contact, tilt, target xyz, constant, rival xyz
+export const SENSOR_NAMES = ['joint angle', 'contact', 'tilt', 'target x', 'target y', 'target z', 'constant', 'rival x', 'rival y', 'rival z'];
 export const FNS = ['sum', 'prod', 'thresh', 'gt', 'abs', 'min', 'max', 'if', 'sin', 'tanh', 'smooth', 'diff', 'wave', 'saw'];
 export const MAX_NODES = 8;
 const MAX_NEURONS = 6;

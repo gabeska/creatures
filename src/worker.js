@@ -10,14 +10,14 @@ let goalFn = null;
 
 self.onmessage = async (e) => {
   await ready;
-  const { batch, genomes, envId, formula, duration } = e.data;
+  const { batch, genomes, envId, formula, duration, opponent } = e.data;
   if (formula !== cachedFormula) {
     goalFn = compileGoal(formula);
     cachedFormula = formula;
   }
   const results = genomes.map((genome) => {
     try {
-      return evaluate(RAPIER, genome, ENVS[envId], formula, goalFn, duration);
+      return evaluate(RAPIER, genome, ENVS[envId], formula, goalFn, duration, opponent);
     } catch (err) {
       return { fitness: INVALID, metrics: null };
     }
