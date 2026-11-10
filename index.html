@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evolved Creatures</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <aside id="panel">
+    <header>
+      <h1>Evolved Creatures</h1>
+      <p class="sub">Bodies and brains grown by a genetic algorithm, after Karl Sims (1994).</p>
+    </header>
+
+    <section>
+      <label for="env">Environment</label>
+      <select id="env"></select>
+      <p class="hint" id="envBlurb"></p>
+
+      <label for="goal">Goal</label>
+      <select id="goal"></select>
+      <p class="hint" id="goalBlurb"></p>
+
+      <label for="formula">Fitness formula</label>
+      <input id="formula" type="text" spellcheck="false" autocomplete="off">
+      <p class="hint error" id="formulaError" hidden></p>
+      <details>
+        <summary>Measurements you can use</summary>
+        <dl id="metricList"></dl>
+        <p class="hint">Combine them with arithmetic and functions such as <code>abs</code>, <code>min</code>, <code>max</code> and <code>sqrt</code>. Higher is fitter.</p>
+      </details>
+    </section>
+
+    <section class="row3">
+      <div>
+        <label for="popSize">Population</label>
+        <select id="popSize">
+          <option>60</option><option selected>120</option><option>200</option><option>300</option><option>500</option>
+        </select>
+      </div>
+      <div>
+        <label for="duration">Trial length</label>
+        <select id="duration">
+          <option value="5">5 s</option><option value="8" selected>8 s</option><option value="12">12 s</option><option value="20">20 s</option>
+        </select>
+      </div>
+      <div>
+        <label for="mutation">Mutation</label>
+        <select id="mutation">
+          <option value="0.06">Low</option><option value="0.12" selected>Medium</option><option value="0.25">High</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="buttons">
+      <button id="run" class="primary">Start evolving</button>
+      <button id="reset">New population</button>
+    </section>
+
+    <section>
+      <div class="stats">
+        <div><span class="k">Generation</span><span class="v" id="statGen">0</span></div>
+        <div><span class="k">Best fitness</span><span class="v" id="statBest">–</span></div>
+        <div><span class="k">Mean fitness</span><span class="v" id="statMean">–</span></div>
+      </div>
+      <div class="progress"><div id="progressBar"></div></div>
+      <p class="hint" id="statusLine">Not started.</p>
+    </section>
+
+    <section>
+      <div class="chartHead">
+        <h2>Fitness by generation</h2>
+        <div class="legend">
+          <span><i style="background:var(--s1)"></i>Best</span>
+          <span><i style="background:var(--s2)"></i>Mean</span>
+        </div>
+      </div>
+      <div id="chart"></div>
+      <p class="hint">Click a generation to watch its champion.</p>
+    </section>
+
+    <section class="buttons">
+      <button id="save">Save run</button>
+      <button id="load">Load run</button>
+      <input id="loadFile" type="file" accept=".json,application/json" hidden>
+    </section>
+  </aside>
+
+  <main id="stage">
+    <div id="view"></div>
+    <div id="caption">
+      <div id="capTitle">Random creature</div>
+      <div id="capDetail"></div>
+    </div>
+    <div id="bar">
+      <label class="check"><input type="checkbox" id="follow" checked> Latest champion</label>
+      <input type="range" id="scrub" min="0" max="0" value="0" disabled aria-label="Generation to watch">
+      <span id="scrubLabel">–</span>
+      <select id="speed" aria-label="Playback speed">
+        <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+      </select>
+    </div>
+  </main>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
