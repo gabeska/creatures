@@ -42,6 +42,21 @@ You can change the environment or goal while a run is going. The population
 carries over, so you can, for example, take evolved walkers and make them learn
 to swim.
 
+### Islands
+
+By default there is one population, and after a few hundred generations nearly
+every creature in it descends from the same early success. Setting **Islands**
+above 1 splits the population into that many groups that evolve separately, so
+several different designs stay alive at once. Every 10 generations each island
+sends a copy of its best creature to the next island, where it replaces the
+worst one. The view shows the best creature across all islands.
+
+With **Fight for the cube**, islands become separate species: each one fights
+the previous champion of the next species, and nothing migrates between them.
+Two islands gives two species evolving against each other.
+
+The Population setting is the total, shared out between the islands.
+
 **Save run** writes the population and its history to a JSON file, and **Load
 run** restores it.
 
@@ -78,7 +93,8 @@ Two creatures start on opposite sides of a cube and are scored on who finishes
 closer to it: `1 + (rival - self) / (rival + self)`, so 1 is a draw, 2 is total
 control and 0 is total defeat.
 
-- Every creature fights the champion of the previous generation.
+- Every creature fights the champion of the previous generation (with
+  several islands, the champion of a rival species; see Islands).
 - Each starts set back from the cube by at least its own height, so a tall
   creature cannot win by falling over.
 - The two creatures collide with each other and with the cube, so they can
@@ -119,9 +135,8 @@ simulation is deterministic, so a replay matches the scored run exactly.
 - Parts of the same creature do not collide with each other.
 - Muscles have a speed limit, and light parts get a minimum mass relative to
   their neighbours. Both exist to stop evolution exploiting physics glitches.
-- The cube contest uses one population scored against the previous champion.
-  Sims' most striking results came from two species evolving against each
-  other, which is not implemented.
+- The cube contest pits each creature against one opponent per generation, a
+  previous champion. Sims also tried larger tournaments.
 
 ## Project layout
 

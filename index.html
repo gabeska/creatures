@@ -32,7 +32,7 @@
       </details>
     </section>
 
-    <section class="row3">
+    <section class="grid2">
       <div>
         <label for="popSize">Population</label>
         <select id="popSize">
@@ -51,6 +51,13 @@
           <option value="0.06">Low</option><option value="0.12" selected>Medium</option><option value="0.25">High</option>
         </select>
       </div>
+      <div>
+        <label for="islands">Islands</label>
+        <select id="islands">
+          <option value="1" selected>1 (off)</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option>
+        </select>
+      </div>
+      <p class="hint wide" id="islandHint"></p>
     </section>
 
     <section class="buttons">
@@ -66,6 +73,7 @@
       </div>
       <div class="progress"><div id="progressBar"></div></div>
       <p class="hint" id="statusLine">Not started.</p>
+      <p class="hint" id="islandLine" hidden></p>
     </section>
 
     <section>

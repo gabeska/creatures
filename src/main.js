@@ -12,7 +12,7 @@ const fmt = (v) => (v == null || v <= INVALID ? '–' : Math.abs(v) >= 100 ? v.t
 
 const state = {
   rng: makeRng((Math.random() * 2 ** 32) >>> 0),
-  pop: [],
+  islands: [], // separate populations, each { pop, rival }
   gen: 0, // number of completed generations
   history: [], // one entry per completed generation, with its champion
   running: false,
@@ -20,7 +20,6 @@ const state = {
   formula: GOALS.travel.formula,
   key: '',
   watch: -1, // history index being watched
-  rival: null, // in a contest, the champion everyone is scored against
 };
 
 await RAPIER.init();
@@ -41,6 +40,7 @@ function settings() {
     formula: state.formula,
     duration: +$('duration').value,
     size: +$('popSize').value,
+    islands: +$('islands').value,
     mutationRate: +$('mutation').value,
   };
 }
@@ -49,7 +49,18 @@ function syncBlurbs() {
   $('envBlurb').textContent = ENVS[$('env').value].blurb;
   const g = GOALS[$('goal').value];
   $('goalBlurb').textContent = g ? g.blurb : 'Your own formula over the measurements below.';
+  const s = settings();
+  const per = perIsland(s);
+  $('islandHint').textContent =
+    s.islands === 1
+      ? 'One population. More islands keep separate lines of creatures going, which helps long runs.'
+      : usesContest(s.formula)
+        ? `${s.islands} species of ${per}. Each fights the champion of the next species, and they never interbreed.`
+        : `${s.islands} islands of ${per} evolve apart. Every ${MIGRATE_EVERY} generations each sends a copy of its best to the next.`;
 }
+
+$('islands').onchange = syncBlurbs;
+$('popSize').onchange = syncBlurbs;
 
 $('env').onchange = () => {
   syncBlurbs();
@@ -92,12 +103,25 @@ $('reset').onclick = async () => {
 
 // ---------- evolution ----------
 
+const MIGRATE_EVERY = 10;
+const perIsland = (s) => Math.max(10, Math.round(s.size / s.islands));
+const everyone = () => state.islands.flatMap((i) => i.pop);
+
+// Make sure there are n islands, dealing the existing creatures out again if the number changed.
+function regroup(n) {
+  if (state.islands.length === n) return;
+  const all = everyone();
+  const old = state.islands;
+  state.islands = Array.from({ length: n }, (_, k) => ({ pop: [], rival: old[k]?.rival ?? null }));
+  all.forEach((c, i) => state.islands[i % n].pop.push(c));
+}
+
 function newPopulation() {
-  state.pop = randomPopulation(state.rng, settings().size);
+  const s = settings();
+  state.islands = Array.from({ length: s.islands }, () => ({ pop: randomPopulation(state.rng, perIsland(s)), rival: null }));
   state.gen = 0;
   state.history = [];
   state.watch = -1;
-  state.rival = null;
   state.key = '';
   $('statusLine').textContent = 'Not started.';
   $('progressBar').style.width = '0';
@@ -108,8 +132,9 @@ function newPopulation() {
 function showRandom() {
   const s = settings();
   const contest = usesContest(s.formula);
-  const opponent = contest ? state.pop[1]?.genome ?? randomViable(state.rng) : null;
-  viewer.show({ genome: state.pop[0]?.genome ?? randomViable(state.rng), envId: s.envId, formula: s.formula, duration: s.duration, opponent });
+  const pop = state.islands[0]?.pop ?? [];
+  const opponent = contest ? pop[1]?.genome ?? randomViable(state.rng) : null;
+  viewer.show({ genome: pop[0]?.genome ?? randomViable(state.rng), envId: s.envId, formula: s.formula, duration: s.duration, opponent });
   $('capTitle').textContent = contest ? 'Two random creatures' : 'A random creature';
   $('capDetail').textContent = 'Generation 0 is all random. Start evolving to improve on it.';
 }
@@ -131,19 +156,31 @@ function pause() {
 async function evolveLoop() {
   while (state.running) {
     const s = settings();
+    regroup(s.islands);
+    const islands = state.islands;
+    const n = islands.length;
     const key = `${s.envId}|${s.formula}|${s.duration}`;
     if (key !== state.key) {
       // The rules changed: old scores no longer apply, but the population carries over.
-      for (const c of state.pop) c.fitness = null;
+      for (const c of everyone()) c.fitness = null;
       state.key = key;
     }
-    // In a contest everyone meets the previous champion, so scores go stale every generation.
+    // In a contest everyone meets a previous champion, so scores go stale every
+    // generation. One island fights its own last champion; several islands are
+    // separate species, each fighting the last champion of the next one.
     const contest = usesContest(s.formula);
-    const rival = contest ? state.rival ?? state.pop[state.pop.length - 1].genome : null;
-    if (contest) for (const c of state.pop) c.fitness = null;
+    islands.forEach((island, k) => {
+      const source = islands[(k + (n > 1 ? 1 : 0)) % n];
+      const rival = contest ? source.rival ?? source.pop[source.pop.length - 1].genome : null;
+      for (const c of island.pop) {
+        c.opponent = rival;
+        if (contest) c.fitness = null;
+      }
+    });
+    const all = everyone();
     const t0 = performance.now();
-    const pending = state.pop.filter((c) => c.fitness === null).length;
-    const done = await pool.evaluate(state.pop, { envId: s.envId, formula: s.formula, duration: s.duration, opponent: rival }, (n, total) => {
+    const pending = all.filter((c) => c.fitness === null).length;
+    const done = await pool.evaluate(all, { envId: s.envId, formula: s.formula, duration: s.duration }, (n, total) => {
       $('progressBar').style.width = `${(100 * n) / total}%`;
       $('statusLine').textContent = `Generation ${state.gen + 1}: simulated ${n} of ${total} creatures on ${pool.size} workers.`;
     });
@@ -151,8 +188,8 @@ async function evolveLoop() {
       $('statusLine').textContent = `Paused during generation ${state.gen + 1}.`;
       return;
     }
-    const sorted = sortByFitness(state.pop);
-    const valid = sorted.filter((c) => c.fitness > INVALID);
+    const sorted = islands.map((island) => sortByFitness(island.pop));
+    const valid = all.filter((c) => c.fitness > INVALID);
     if (valid.length === 0) {
       // Nothing scored at all, which means the formula fails on real data.
       state.running = false;
@@ -162,15 +199,32 @@ async function evolveLoop() {
     }
     const mean = valid.reduce((a, c) => a + c.fitness, 0) / valid.length;
     state.gen++;
-    state.history.push({
-      gen: state.gen, best: sorted[0].fitness, mean,
-      genome: sorted[0].genome, metrics: sorted[0].metrics,
-      envId: s.envId, formula: s.formula, duration: s.duration, opponent: rival,
+    let top = 0;
+    sorted.forEach((list, k) => {
+      if (list[0].fitness > sorted[top][0].fitness) top = k;
     });
-    state.rival = sorted[0].genome;
+    const champion = sorted[top][0];
+    state.history.push({
+      gen: state.gen, best: champion.fitness, mean,
+      genome: champion.genome, metrics: champion.metrics,
+      envId: s.envId, formula: s.formula, duration: s.duration, opponent: champion.opponent ?? null,
+      island: top, islandBest: sorted.map((list) => list[0].fitness),
+    });
     const rate = pending / ((performance.now() - t0) / 1000);
     $('statusLine').textContent = `Generation ${state.gen} done: ${pending} creatures at ${rate.toFixed(0)} per second.`;
-    state.pop = nextGeneration(sorted, state.rng, s);
+    islands.forEach((island, k) => (island.rival = sorted[k][0].genome));
+
+    // Migration: now and then each island's best displaces the worst on the
+    // next island. Contest species stay separate.
+    if (n > 1 && !contest && state.gen % MIGRATE_EVERY === 0) {
+      const bests = sorted.map((list) => list[0]);
+      sorted.forEach((list, k) => {
+        const m = bests[(k + n - 1) % n];
+        list[list.length - 1] = { genome: m.genome, fitness: m.fitness, metrics: m.metrics };
+        sorted[k] = sortByFitness(list);
+      });
+    }
+    islands.forEach((island, k) => (island.pop = nextGeneration(sorted[k], state.rng, { ...s, size: perIsland(s) })));
     if ($('follow').checked || state.watch < 0) watch(state.history.length - 1, false);
     refresh();
   }
@@ -190,10 +244,15 @@ function watch(i, byUser) {
     viewer.show({ genome: h.genome, envId: h.envId, formula: h.formula, duration: h.duration, opponent: h.opponent }, byUser);
   }
   const goal = Object.values(GOALS).find((g) => g.formula === h.formula);
+  const many = (h.islandBest?.length ?? 1) > 1;
   $('capTitle').textContent = h.opponent
-    ? `Generation ${h.gen} champion against the one before it (yellow)`
+    ? many
+      ? `Generation ${h.gen} champion against a rival species' champion (yellow)`
+      : `Generation ${h.gen} champion against the one before it (yellow)`
     : `Champion of generation ${h.gen}`;
-  $('capDetail').textContent = `Fitness ${fmt(h.best)} · ${h.metrics?.parts ?? '?'} parts · ${ENVS[h.envId].name} · ${goal ? goal.name : h.formula}`;
+  $('capDetail').textContent =
+    `Fitness ${fmt(h.best)} · ${h.metrics?.parts ?? '?'} parts · ${ENVS[h.envId].name} · ${goal ? goal.name : h.formula}` +
+    (many ? ` · island ${h.island + 1} of ${h.islandBest.length}` : '');
   refresh();
 }
 
@@ -202,6 +261,9 @@ function refresh() {
   $('statGen').textContent = state.gen;
   $('statBest').textContent = fmt(last?.best);
   $('statMean').textContent = fmt(last?.mean);
+  const perIslandBest = last?.islandBest ?? [];
+  $('islandLine').hidden = perIslandBest.length < 2;
+  $('islandLine').textContent = `Best on each island: ${perIslandBest.map(fmt).join(' · ')}`;
   const scrub = $('scrub');
   scrub.disabled = state.history.length < 2;
   scrub.max = Math.max(0, state.history.length - 1);
@@ -214,8 +276,9 @@ function refresh() {
 
 $('save').onclick = () => {
   const data = {
-    app: 'evolved-creatures', version: 1, settings: { ...settings(), goal: $('goal').value },
-    gen: state.gen, history: state.history, rival: state.rival, population: state.pop.map((c) => c.genome),
+    app: 'evolved-creatures', version: 2, settings: { ...settings(), goal: $('goal').value },
+    gen: state.gen, history: state.history,
+    islands: state.islands.map((i) => ({ rival: i.rival, population: i.pop.map((c) => c.genome) })),
   };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
@@ -230,20 +293,21 @@ $('loadFile').onchange = async () => {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
-    if (data.app !== 'evolved-creatures' || !Array.isArray(data.population) || !data.population.length) throw new Error('not a saved run');
+    // Version 1 files hold a single population.
+    const saved = data.islands ?? [{ rival: data.rival ?? null, population: data.population }];
+    if (data.app !== 'evolved-creatures' || !saved.every((i) => Array.isArray(i.population) && i.population.length)) throw new Error('not a saved run');
     await pause();
     const s = data.settings ?? {};
     if (ENVS[s.envId]) $('env').value = s.envId;
     if (s.formula && !checkGoal(s.formula)) setFormula(s.formula);
     $('goal').value = Object.entries(GOALS).find(([, g]) => g.formula === state.formula)?.[0] ?? 'custom';
-    for (const [id, v] of [['duration', s.duration], ['popSize', s.size], ['mutation', s.mutationRate]]) {
+    for (const [id, v] of [['duration', s.duration], ['popSize', s.size], ['mutation', s.mutationRate], ['islands', saved.length]]) {
       if ([...$(id).options].some((o) => +o.value === v)) $(id).value = v;
     }
     syncBlurbs();
-    state.pop = data.population.map((genome) => ({ genome, fitness: null }));
+    state.islands = saved.map((i) => ({ rival: i.rival ?? null, pop: i.population.map((genome) => ({ genome, fitness: null })) }));
     state.history = Array.isArray(data.history) ? data.history : [];
     state.gen = data.gen ?? state.history.length;
-    state.rival = data.rival ?? null;
     state.key = '';
     state.watch = -1;
     $('run').textContent = 'Resume';

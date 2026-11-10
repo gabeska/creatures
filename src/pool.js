@@ -39,7 +39,7 @@ export class Pool {
           if (run === this.run) onProgress?.(finished, todo.length);
           feed(worker);
         };
-        worker.postMessage({ genomes: items.map((c) => c.genome), ...cfg });
+        worker.postMessage({ genomes: items.map((c) => c.genome), opponents: items.map((c) => c.opponent ?? null), ...cfg });
       };
       this.workers.forEach(feed);
     });

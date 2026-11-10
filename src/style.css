@@ -34,7 +34,7 @@ h2 { font-size: 13px; margin: 0; font-weight: 600; }
 .sub { color: var(--muted); margin: 4px 0 0; font-size: 12.5px; }
 section { margin-top: 18px; }
 label { display: block; font-size: 12px; color: var(--ink2); margin: 12px 0 4px; }
-section > label:first-child, .row3 label { margin-top: 0; }
+section > label:first-child, .grid2 label { margin-top: 0; }
 select, input[type="text"], button {
   width: 100%;
   background: var(--raised);
@@ -51,7 +51,8 @@ button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 button.primary:hover { filter: brightness(1.1); }
 .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 8px; }
+.grid2 .wide { grid-column: 1 / -1; margin: 0; }
 .hint { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
 .hint.error { color: var(--bad); }
 details { margin-top: 8px; font-size: 12px; }
